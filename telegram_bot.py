@@ -16,8 +16,8 @@ from dotenv import load_dotenv
 # ============================================================
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("8992064482:AAFTDUP3SD58fehc0Kpz0jcyGq919dozD0g")
-FREEMODEL_API_KEY = os.getenv("fe_oa_9dcaf183ce4139e607d5b2cc7aeda3e628ddeaf71adf4f81")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+FREEMODEL_API_KEY = os.getenv("FREEMODEL_API_KEY")
 
 FREEMODEL_BASE_URL = "https://api.freemodel.dev/v1"
 MODEL_NAME = "gpt-5.5"
