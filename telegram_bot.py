@@ -1,180 +1,202 @@
 import os
-import logging
-import httpx
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
 from dotenv import load_dotenv
 
-# ============================================================
-#  LOAD ENV
-# ============================================================
-load_dotenv()
+load_dotenv(dotenv_path=".env")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-FREEMODEL_API_KEY = os.getenv("FREEMODEL_API_KEY")
+import json
+import requests
+from bs4 import BeautifulSoup
+from openai import OpenAI
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-FREEMODEL_BASE_URL = "https://api.freemodel.dev/v1"
-MODEL_NAME = "gpt-5.5"
+# DEBUG CHECK (hapus nanti kalau production)
+print("TOKEN:", os.getenv("TELEGRAM_BOT_TOKEN"))
+print("API:", os.getenv("FREEMODEL_API_KEY"))
+print("BASE:", os.getenv("BASE_URL"))
 
-# ============================================================
-#  LOGGING
-# ============================================================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+# SAFETY CHECK
+if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    raise Exception("Missing TELEGRAM_BOT_TOKEN in .env")
+
+# ======================
+# CONFIG
+# ======================
+
+client = OpenAI(
+    api_key=os.getenv("FREEMODEL_API_KEY"),
+    base_url=os.getenv("BASE_URL", "https://api.freemodel.dev/v1")
 )
-logger = logging.getLogger(__name__)
 
-# ============================================================
-#  SYSTEM PROMPT
-# ============================================================
-SYSTEM_PROMPT = """
-Kamu adalah Adit Agent Serbaguna 5.0.
-Kamu adalah asisten AI pribadi milik Adit.
+# ======================
+# TOOLS
+# ======================
 
-Kemampuan utama:
-- Menjawab pertanyaan umum
-- Membantu coding
-- Membantu Linux
-- Membantu crypto dan blockchain
-- Membantu menulis artikel
-- Membantu membuat thread Twitter/X
-- Brainstorming ide dan strategi
+def web_search(query: str):
+    url = f"https://duckduckgo.com/html/?q={query}"
+    res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
 
-Kepribadian:
-- Santai
-- Ramah
-- Cerdas
-- Tidak bertele-tele
-- Menjelaskan hal rumit dengan bahasa sederhana
+    soup = BeautifulSoup(res.text, "html.parser")
 
-Aturan:
-- Gunakan bahasa yang sama dengan pengguna.
-- Jangan mengaku sebagai ChatGPT, OpenAI, atau model lain.
-- Jika ditanya siapa kamu, jawab: Adit Agent Serbaguna 5.0.
+    results = []
+    for a in soup.select(".result__a")[:5]:
+        title = a.get_text()
+        link = a.get("href")
+        results.append(f"{title} | {link}")
+
+    return "\n".join(results) if results else "No results found"
+
+
+def write_file(path: str, content: str):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"✅ File created: {path}"
+
+
+def read_file(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+
+# ======================
+# ROUTER (simple brain)
+# ======================
+
+def classify_task(text: str):
+    text = text.lower()
+
+    if any(w in text for w in ["code", "bug", "error", "script", "function", "fix"]):
+        return "coding"
+
+    if any(w in text for w in ["why", "explain", "analyze", "compare"]):
+        return "reasoning"
+
+    if "file" in text or "create" in text:
+        return "file"
+
+    return "fast"
+
+
+# ======================
+# PLANNER
+# ======================
+
+def planner(user_input: str):
+    prompt = f"""
+You are an AI agent planner.
+
+User request:
+{user_input}
+
+Return STRICT JSON only:
+{{
+  "steps": [
+    {{
+      "tool": "web_search | write_file | read_file | none",
+      "input": "string or object"
+    }}
+  ]
+}}
+
+Only return valid JSON. No explanation.
 """
 
-# ============================================================
-#  MEMORY USER
-# ============================================================
-user_histories: dict[int, list] = {}
-
-def get_history(user_id: int):
-    if user_id not in user_histories:
-        user_histories[user_id] = []
-    return user_histories[user_id]
-
-def reset_history(user_id: int):
-    user_histories[user_id] = []
-
-# ============================================================
-#  AI CALL (ASYNC)
-# ============================================================
-async def chat_with_ai(user_id: int, user_message: str) -> str:
-    history = get_history(user_id)
-    history.append({"role": "user", "content": user_message})
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    res = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{FREEMODEL_BASE_URL}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {FREEMODEL_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": MODEL_NAME,
-                    "messages": messages,
-                },
-            )
+        return json.loads(res.choices[0].message.content)
+    except:
+        return {"steps": []}
 
-        data = response.json()
 
-        if response.status_code != 200:
-            logger.error(f"API error: {data}")
-            return f"⚠️ API error {response.status_code}"
+# ======================
+# TOOL EXECUTOR
+# ======================
 
-        reply = data["choices"][0]["message"]["content"]
+def execute_tool(step):
+    tool = step.get("tool")
+    inp = step.get("input")
 
-        history.append({"role": "assistant", "content": reply})
+    if tool == "web_search":
+        return web_search(inp)
 
-        # keep last 40 messages only
-        user_histories[user_id] = history[-40:]
+    if tool == "write_file":
+        return write_file(inp["path"], inp["content"])
 
-        return reply
+    if tool == "read_file":
+        return read_file(inp)
 
-    except Exception as e:
-        logger.error(f"Request error: {e}")
-        return f"⚠️ Error: {e}"
+    return None
 
-# ============================================================
-#  COMMANDS
-# ============================================================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.effective_user.first_name or "bro"
 
-    await update.message.reply_text(
-        f"Yo {name}! Gue Adit Agent Serbaguna 5.0 🤖\n\n"
-        "Gue bisa bantu:\n"
-        "- Coding & Linux\n"
-        "- Crypto & blockchain\n"
-        "- Nulis & brainstorming\n\n"
-        "Langsung aja chat. /reset buat mulai ulang.",
+# ======================
+# AGENT CORE
+# ======================
+
+def run_agent(user_input: str):
+    plan = planner(user_input)
+
+    observations = []
+
+    for step in plan.get("steps", []):
+        result = execute_tool(step)
+        if result:
+            observations.append(result)
+
+    final_prompt = f"""
+You are an advanced AI agent.
+
+User request:
+{user_input}
+
+Plan:
+{json.dumps(plan, indent=2)}
+
+Tool results:
+{observations}
+
+Give a clear, helpful final answer.
+"""
+
+    res = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": final_prompt}],
+        temperature=0.7
     )
 
-async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_history(update.effective_user.id)
-    await update.message.reply_text("🔄 Memory di-reset.")
+    return res.choices[0].message.content
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "/start - mulai bot\n"
-        "/reset - reset memory\n"
-        "/help - bantuan",
-    )
 
-# ============================================================
-#  MESSAGE HANDLER
-# ============================================================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+# ======================
+# TELEGRAM HANDLER
+# ======================
+
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
+    response = run_agent(user_text)
+    await update.message.reply_text(response)
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action="typing",
-    )
 
-    reply = await chat_with_ai(user_id, user_text)
+# ======================
+# MAIN
+# ======================
 
-    await update.message.reply_text(reply)
-
-# ============================================================
-#  MAIN
-# ============================================================
 def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN belum di-set di environment")
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-
-    logger.info("Adit Agent jalan...")
+    print("🤖 Autonomous Agent Running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
