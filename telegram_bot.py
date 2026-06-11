@@ -7,6 +7,7 @@ import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 
 # ======================
@@ -40,6 +41,23 @@ client = OpenAI(
     api_key=os.getenv("FREEMODEL_API_KEY"),
     base_url=os.getenv("BASE_URL", "https://api.freemodel.dev/v1")
 )
+def test_llm():
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "reply only OK"
+                }
+            ],
+            max_tokens=5
+        )
+
+        logger.info("✅ LLM connection successful")
+
+    except Exception as e:
+        logger.error(f"❌ LLM connection failed: {e}")
 
 MAX_HISTORY = 20        # jumlah pesan yang disimpan per user (10 pasang)
 RATE_LIMIT_SECONDS = 5  # cooldown antar request per user
@@ -168,11 +186,15 @@ def web_search(query: str) -> str:
 def write_file(path: str, content: str) -> str:
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
+
         return f"✅ File created: {path}"
+
     except Exception as e:
-        logger.error(f"handle error for chat_id {chat_id}: {e}", exc_info=True)
+        logger.error(f"write_file error: {e}", exc_info=True)
+        return f"❌ Error writing file: {str(e)}"
 
 def read_file(path: str) -> str:
     try:
@@ -205,22 +227,31 @@ Return STRICT JSON only:
 
 Only return valid JSON. No explanation, no markdown.
 """
+
     try:
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2
         )
+
         raw = res.choices[0].message.content.strip()
-        # Strip markdown code fences kalau ada
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
+
+        logger.info(f"Planner output: {raw}")
+
+        raw = (
+            raw
+            .replace("```json", "")
+            .replace("```", "")
+            .strip()
+        )
+
+        return json.loads(raw)
+
     except json.JSONDecodeError as e:
         logger.warning(f"Planner JSON parse error: {e}")
         return {"steps": []}
+
     except Exception as e:
         logger.error(f"Planner error: {e}")
         return {"steps": []}
@@ -230,6 +261,8 @@ Only return valid JSON. No explanation, no markdown.
 # ======================
 
 def execute_tool(step: dict):
+    logger.info(f"Executing tool: {step}")
+
     tool = step.get("tool")
     inp  = step.get("input")
 
@@ -272,6 +305,7 @@ def run_agent(user_input: str, chat_id: int) -> str:
 
     # Gabungkan tool results ke user message
     tool_context = ""
+
     if observations:
         tool_context = "\n\n[Tool Results]\n" + "\n\n".join(observations)
 
@@ -282,13 +316,22 @@ def run_agent(user_input: str, chat_id: int) -> str:
 
     messages = [system_msg] + history + [current_user_msg]
 
-    res = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        temperature=0.7
-    )
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.7
+        )
 
-    answer = res.choices[0].message.content
+        answer = res.choices[0].message.content
+
+    except Exception as e:
+        logger.error(f"LLM error: {e}", exc_info=True)
+
+        return (
+            "⚠️ AI Provider Error\n\n"
+            f"{str(e)}"
+        )
 
     # Simpan ke SQLite (persistent memory)
     save_message(chat_id, "user", user_input)
@@ -328,7 +371,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_last_request[chat_id] = now
 
     # Typing indicator
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await context.bot.send_chat_action(
+    chat_id=chat_id,
+    action=ChatAction.TYPING
+)
 
     try:
         response = run_agent(user_text, chat_id)
@@ -381,19 +427,46 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"""
+🤖 Adit Agent Status
+
+DB_PATH: {DB_PATH}
+MAX_HISTORY: {MAX_HISTORY}
+RATE_LIMIT: {RATE_LIMIT_SECONDS}s
+"""
+    )
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🏓 Pong")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"""
+🤖 Adit Agent Status
+
+DB_PATH: {DB_PATH}
+MAX_HISTORY: {MAX_HISTORY}
+RATE_LIMIT: {RATE_LIMIT_SECONDS}s
+"""
+    )
 # ======================
 # MAIN
 # ======================
 
 def main():
-    init_db()  # Inisialisasi database saat startup
+    init_db()
+    test_llm()  # Inisialisasi database saat startup
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     app   = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(CommandHandler("help",  cmd_help))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("ping", cmd_ping))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
     logger.info("🤖 Adit Agent Running...")
