@@ -172,8 +172,7 @@ def write_file(path: str, content: str) -> str:
             f.write(content)
         return f"✅ File created: {path}"
     except Exception as e:
-        logger.error(f"write_file error: {e}")
-        return f"❌ Failed to write file: {str(e)}"
+        logger.error(f"handle error for chat_id {chat_id}: {e}", exc_info=True)
 
 def read_file(path: str) -> str:
     try:
