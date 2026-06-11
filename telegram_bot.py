@@ -427,16 +427,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"""
-🤖 Adit Agent Status
-
-DB_PATH: {DB_PATH}
-MAX_HISTORY: {MAX_HISTORY}
-RATE_LIMIT: {RATE_LIMIT_SECONDS}s
-"""
-    )
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong")
 
@@ -457,7 +447,8 @@ RATE_LIMIT: {RATE_LIMIT_SECONDS}s
 
 def main():
     init_db()
-    test_llm()  # Inisialisasi database saat startup
+
+    # test_llm()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     app   = ApplicationBuilder().token(token).build()
